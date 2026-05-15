@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       torrent_input:
-        description: 'Enter torrent file URL or magnet link'
+        description: 'Enter torrent file URL, magnet link, or base64 encoded .torrent data'
         required: true
         type: string
       hf_upload:
@@ -58,10 +58,24 @@ jobs:
 
       - name: Download torrent/magnet
         run: |
-          echo "⏬ Starting download from: ${{ github.event.inputs.torrent_input }}"
-          transmission-cli "${{ github.event.inputs.torrent_input }}" \
-            --download-dir ./downloads \
-            --exit
+          INPUT="${{ github.event.inputs.torrent_input }}"
+          
+          if [[ "$INPUT" == data:* ]]; then
+            echo "📁 Detected base64 uploaded torrent file. Decoding..."
+            # Strip the Data URI header and decode base64
+            echo "$INPUT" | sed 's/^data:.*base64,//' | base64 --decode > local.torrent
+            
+            echo "⏬ Starting download from local.torrent"
+            transmission-cli local.torrent \
+              --download-dir ./downloads \
+              --exit
+          else
+            echo "⏬ Starting download from: $INPUT"
+            transmission-cli "$INPUT" \
+              --download-dir ./downloads \
+              --exit
+          fi
+          
           echo "✅ Download completed"
 
       - name: List downloaded files
@@ -179,4 +193,7 @@ jobs:
             USERNAME="${{ github.event.inputs.hf_username }}"
             REPO_NAME="${{ github.event.inputs.hf_repo_name }}"
             REPO_TYPE="${{ github.event.inputs.hf_repo_type }}"
-            echo "**Hugging Face Upload:** ✅
+            echo "**Hugging Face Upload:** ✅ Uploaded to [$USERNAME/$REPO_NAME](https://huggingface.co/$USERNAME/$REPO_NAME)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Hugging Face Upload:** ⏸️ Skipped" >> $GITHUB_STEP_SUMMARY
+          fi
