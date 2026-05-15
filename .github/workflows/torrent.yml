@@ -13,9 +13,9 @@ on:
         default: '10'
         type: string
       timeout:
-        description: 'Download timeout in seconds'
+        description: 'Download timeout in seconds (1-600, default 60)'
         required: false
-        default: '3600'
+        default: '60'
         type: string
 
 jobs:
@@ -39,6 +39,17 @@ jobs:
           echo "Max connections: ${{ github.event.inputs.max_connections }}"
           echo "Timeout: ${{ github.event.inputs.timeout }}"
 
+      - name: Validate timeout
+        id: validate_timeout
+        run: |
+          TIMEOUT=${{ github.event.inputs.timeout }}
+          if [ $TIMEOUT -lt 1 ] || [ $TIMEOUT -gt 600 ]; then
+            echo "⚠️ Timeout must be between 1-600 seconds. Using default: 60"
+            echo "timeout=60" >> $GITHUB_OUTPUT
+          else
+            echo "timeout=$TIMEOUT" >> $GITHUB_OUTPUT
+          fi
+
       - name: Validate input
         id: validate
         run: |
@@ -47,14 +58,10 @@ jobs:
             echo "type=magnet" >> $GITHUB_OUTPUT
             echo "input=$INPUT" >> $GITHUB_OUTPUT
             echo "✅ Detected: Magnet link"
-          elif [[ $INPUT == http* ]] && [[ $INPUT == *.torrent ]]; then
-            echo "type=torrent_url" >> $GITHUB_OUTPUT
-            echo "input=$INPUT" >> $GITHUB_OUTPUT
-            echo "✅ Detected: Torrent file URL"
           elif [[ $INPUT == http* ]]; then
             echo "type=torrent_url" >> $GITHUB_OUTPUT
             echo "input=$INPUT" >> $GITHUB_OUTPUT
-            echo "✅ Detected: URL (will attempt download)"
+            echo "✅ Detected: Torrent file URL"
           else
             echo "❌ Invalid input: Must be a magnet link (magnet:?...) or HTTP URL"
             exit 1
@@ -67,7 +74,7 @@ jobs:
             --dir=./downloads \
             --max-connection-per-server=${{ github.event.inputs.max_connections }} \
             --split=10 \
-            --timeout=${{ github.event.inputs.timeout }} \
+            --timeout=${{ steps.validate_timeout.outputs.timeout }} \
             --continue=true \
             --max-tries=5 \
             --retry-wait=3 \
@@ -94,7 +101,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Download Settings:**" >> $GITHUB_STEP_SUMMARY
           echo "- Max Connections: ${{ github.event.inputs.max_connections }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Timeout: ${{ github.event.inputs.timeout }}s" >> $GITHUB_STEP_SUMMARY
+          echo "- Timeout: ${{ steps.validate_timeout.outputs.timeout }}s" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Files Downloaded:**" >> $GITHUB_STEP_SUMMARY
-          ls -lh downloads/ | tail -n +2 | awk '{print "- " $9 " (" $5 ")"}' >> $GITHUB_STEP_SUMMARY
+          ls -lh downloads/ | tail -n +2 | awk '{print "- " $9 " (" $5 ")"}' >> $GITHUB_STEP_SUMMARY || echo "- No files downloaded" >> $GITHUB_STEP_SUMMARY
