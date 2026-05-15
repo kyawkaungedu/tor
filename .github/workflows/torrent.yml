@@ -1,4 +1,4 @@
-name: Download Torrent or Magnet
+name: Download Torrent/Magnet & Upload to Hugging Face
 
 on:
   workflow_dispatch:
@@ -7,16 +7,42 @@ on:
         description: 'Enter torrent file URL or magnet link'
         required: true
         type: string
-      max_connections:
-        description: 'Max connections per server'
+      hf_upload:
+        description: 'Upload to Hugging Face? (true/false)'
         required: false
-        default: '10'
+        default: 'false'
+        type: string
+      hf_token:
+        description: 'Hugging Face API token (required if upload=true)'
+        required: false
+        type: string
+      hf_username:
+        description: 'Hugging Face username or org name'
+        required: false
+        type: string
+      hf_repo_name:
+        description: 'Repository name on Hugging Face'
+        required: false
+        type: string
+      hf_repo_type:
+        description: 'Repository type (model, dataset, space)'
+        required: false
+        default: 'model'
+        type: choice
+        options:
+          - model
+          - dataset
+          - space
+      hf_private:
+        description: 'Make repository private? (true/false)'
+        required: false
+        default: 'false'
         type: string
 
 jobs:
-  download:
+  download-and-upload:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 360
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -24,36 +50,113 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2
+          sudo apt-get install -y transmission-cli python3-pip git-lfs
+          pip install --upgrade huggingface-hub
 
       - name: Create downloads directory
         run: mkdir -p downloads
 
-      - name: Download via aria2c with timeout
+      - name: Download torrent/magnet
         run: |
-          timeout 600 aria2c \
-            "${{ github.event.inputs.torrent_input }}" \
-            --dir=./downloads \
-            --max-connection-per-server=${{ github.event.inputs.max_connections }} \
-            --split=10 \
-            --continue=true \
-            --max-tries=5 \
-            --retry-wait=3 \
-            -x 10 \
-            --bt-stop-timeout=5 \
-            --seed-time=0 \
-            --bt-max-peers=100 \
-            --disable-ipv6 \
-            --no-conf \
-            --file-allocation=none || echo "Download completed or timed out"
+          echo "⏬ Starting download from: ${{ github.event.inputs.torrent_input }}"
+          transmission-cli "${{ github.event.inputs.torrent_input }}" \
+            --download-dir ./downloads \
+            --exit
+          echo "✅ Download completed"
 
       - name: List downloaded files
         run: |
           echo "📦 Downloaded files:"
-          ls -lh downloads/ 2>/dev/null || echo "No files found"
-          du -sh downloads/ 2>/dev/null || echo "Directory empty"
+          du -sh downloads/*
+          ls -lh downloads/
 
-      - name: Upload artifact
+      - name: Validate Hugging Face inputs
+        id: validate_hf
+        run: |
+          UPLOAD="${{ github.event.inputs.hf_upload }}"
+          if [[ "$UPLOAD" == "true" ]]; then
+            if [[ -z "${{ github.event.inputs.hf_token }}" ]]; then
+              echo "❌ Error: HF token required for upload"
+              exit 1
+            fi
+            if [[ -z "${{ github.event.inputs.hf_username }}" ]]; then
+              echo "❌ Error: HF username required for upload"
+              exit 1
+            fi
+            if [[ -z "${{ github.event.inputs.hf_repo_name }}" ]]; then
+              echo "❌ Error: HF repo name required for upload"
+              exit 1
+            fi
+            echo "should_upload=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_upload=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload to Hugging Face
+        if: steps.validate_hf.outputs.should_upload == 'true'
+        env:
+          HF_TOKEN: ${{ github.event.inputs.hf_token }}
+        run: |
+          REPO_TYPE="${{ github.event.inputs.hf_repo_type }}"
+          USERNAME="${{ github.event.inputs.hf_username }}"
+          REPO_NAME="${{ github.event.inputs.hf_repo_name }}"
+          PRIVATE="${{ github.event.inputs.hf_private }}"
+          
+          echo "🚀 Uploading to Hugging Face..."
+          echo "  Repository: $USERNAME/$REPO_NAME"
+          echo "  Type: $REPO_TYPE"
+          echo "  Private: $PRIVATE"
+          
+          # Python script for upload
+          python3 << 'EOF'
+          import os
+          from huggingface_hub import HfApi, RepoType
+          
+          api = HfApi()
+          token = os.getenv("HF_TOKEN")
+          repo_type = "${{ github.event.inputs.hf_repo_type }}"
+          username = "${{ github.event.inputs.hf_username }}"
+          repo_name = "${{ github.event.inputs.hf_repo_name }}"
+          private = "${{ github.event.inputs.hf_private }}" == "true"
+          
+          # Create repo if it doesn't exist
+          repo_id = f"{username}/{repo_name}"
+          try:
+            api.create_repo(
+              repo_id=repo_id,
+              repo_type=repo_type,
+              private=private,
+              exist_ok=True,
+              token=token
+            )
+            print(f"✅ Repository ready: {repo_id}")
+          except Exception as e:
+            print(f"⚠️ Repo creation: {e}")
+          
+          # Upload all files
+          for root, dirs, files in os.walk("./downloads"):
+            for file in files:
+              file_path = os.path.join(root, file)
+              relative_path = os.path.relpath(file_path, "./downloads")
+              
+              try:
+                print(f"📤 Uploading: {relative_path}")
+                api.upload_file(
+                  path_or_fileobj=file_path,
+                  path_in_repo=relative_path,
+                  repo_id=repo_id,
+                  repo_type=repo_type,
+                  token=token
+                )
+                print(f"✅ Uploaded: {relative_path}")
+              except Exception as e:
+                print(f"❌ Failed to upload {relative_path}: {e}")
+                raise
+          
+          print(f"\n✅ All files uploaded to {repo_id}")
+          EOF
+
+      - name: Upload artifact (local backup)
         uses: actions/upload-artifact@v4
         with:
           name: downloaded-content
@@ -63,9 +166,17 @@ jobs:
       - name: Create summary
         if: always()
         run: |
-          echo "## ✅ Download Complete" >> $GITHUB_STEP_SUMMARY
+          echo "## ✅ Download & Upload Complete" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Status:** Download finished or timed out after 10 minutes" >> $GITHUB_STEP_SUMMARY
+          echo "**Download Status:** ✅ Completed" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Downloaded Content:**" >> $GITHUB_STEP_SUMMARY
-          ls -lh downloads/ 2>/dev/null | tail -n +2 | awk '{print "- " $9 " (" $5 ")"}' >> $GITHUB_STEP_SUMMARY || echo "- No files available" >> $GITHUB_STEP_SUMMARY
+          echo "**Downloaded Files:**" >> $GITHUB_STEP_SUMMARY
+          ls -lh downloads/ 2>/dev/null | tail -n +2 | awk '{print "- " $9 " (" $5 ")"}' >> $GITHUB_STEP_SUMMARY || echo "- No files" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          UPLOAD="${{ github.event.inputs.hf_upload }}"
+          if [[ "$UPLOAD" == "true" ]]; then
+            USERNAME="${{ github.event.inputs.hf_username }}"
+            REPO_NAME="${{ github.event.inputs.hf_repo_name }}"
+            REPO_TYPE="${{ github.event.inputs.hf_repo_type }}"
+            echo "**Hugging Face Upload:** ✅
