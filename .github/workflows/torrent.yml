@@ -16,7 +16,7 @@ on:
 jobs:
   download:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -24,14 +24,14 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2 curl
+          sudo apt-get install -y aria2
 
       - name: Create downloads directory
         run: mkdir -p downloads
 
-      - name: Download via aria2c (NO SEEDING)
+      - name: Download via aria2c with timeout
         run: |
-          aria2c \
+          timeout 600 aria2c \
             "${{ github.event.inputs.torrent_input }}" \
             --dir=./downloads \
             --max-connection-per-server=${{ github.event.inputs.max_connections }} \
@@ -40,17 +40,18 @@ jobs:
             --max-tries=5 \
             --retry-wait=3 \
             -x 10 \
-            --bt-stop-timeout=0 \
+            --bt-stop-timeout=5 \
             --seed-time=0 \
-            --bt-seed-uncontrolled=false \
-            --bt-max-peers=50 \
+            --bt-max-peers=100 \
             --disable-ipv6 \
-            --no-conf
+            --no-conf \
+            --file-allocation=none || echo "Download completed or timed out"
 
       - name: List downloaded files
         run: |
           echo "📦 Downloaded files:"
-          ls -lh downloads/
+          ls -lh downloads/ 2>/dev/null || echo "No files found"
+          du -sh downloads/ 2>/dev/null || echo "Directory empty"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -64,5 +65,7 @@ jobs:
         run: |
           echo "## ✅ Download Complete" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Downloaded File:**" >> $GITHUB_STEP_SUMMARY
-          ls -lh downloads/ | tail -n +2 | awk '{print "- " $9 " (" $5 ")"}' >> $GITHUB_STEP_SUMMARY || echo "- No files downloaded" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** Download finished or timed out after 10 minutes" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Downloaded Content:**" >> $GITHUB_STEP_SUMMARY
+          ls -lh downloads/ 2>/dev/null | tail -n +2 | awk '{print "- " $9 " (" $5 ")"}' >> $GITHUB_STEP_SUMMARY || echo "- No files available" >> $GITHUB_STEP_SUMMARY
