@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       torrent_input:
-        description: 'Enter torrent file URL, magnet link, or base64 encoded .torrent data'
+        description: 'Enter torrent file URL, magnet link, base64 data, or gist URL'
         required: true
         type: string
       hf_upload:
@@ -50,7 +50,8 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y transmission-cli python3-pip git-lfs
+          # NEW: Removed transmission-cli, added aria2
+          sudo apt-get install -y aria2 python3-pip git-lfs curl
           pip install --upgrade huggingface-hub
 
       - name: Create downloads directory
@@ -59,22 +60,29 @@ jobs:
       - name: Download torrent/magnet
         run: |
           INPUT="${{ github.event.inputs.torrent_input }}"
+          TARGET_FILE=""
           
-          if [[ "$INPUT" == data:* ]]; then
-            echo "📁 Detected base64 uploaded torrent file. Decoding..."
-            # Strip the Data URI header and decode base64
+          if [[ "$INPUT" == gist:* ]]; then
+            echo "📁 Detected Gist URL bypass for large torrent. Downloading..."
+            GIST_URL="${INPUT#gist:}"
+            curl -s "$GIST_URL" | sed 's/^data:.*base64,//' | base64 --decode > local.torrent
+            TARGET_FILE="local.torrent"
+          elif [[ "$INPUT" == data:* ]]; then
+            echo "📁 Detected inline base64 torrent file. Decoding..."
             echo "$INPUT" | sed 's/^data:.*base64,//' | base64 --decode > local.torrent
-            
-            echo "⏬ Starting download from local.torrent"
-            transmission-cli local.torrent \
-              --download-dir ./downloads \
-              --exit
+            TARGET_FILE="local.torrent"
           else
-            echo "⏬ Starting download from: $INPUT"
-            transmission-cli "$INPUT" \
-              --download-dir ./downloads \
-              --exit
+            echo "🔗 Detected standard URL or Magnet link."
+            TARGET_FILE="$INPUT"
           fi
+          
+          echo "⏬ Starting download with aria2c..."
+          # NEW: Executing via aria2c
+          aria2c --dir=./downloads \
+                 --seed-time=0 \
+                 --file-allocation=none \
+                 --summary-interval=10 \
+                 "$TARGET_FILE"
           
           echo "✅ Download completed"
 
@@ -150,6 +158,10 @@ jobs:
           # Upload all files
           for root, dirs, files in os.walk("./downloads"):
             for file in files:
+              # NEW: Skip any aria2 control files just in case
+              if file.endswith('.aria2'):
+                  continue
+                  
               file_path = os.path.join(root, file)
               relative_path = os.path.relpath(file_path, "./downloads")
               
