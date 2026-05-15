@@ -1,36 +1,100 @@
-# This is a basic workflow to help you get started with Actions
+name: Download Torrent or Magnet
 
-name: Torrent Downloader
-
-# Controls when the workflow will run
 on:
-  # Triggers the workflow on push or pull request events but only for the "main" branch
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
-
-  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
+    inputs:
+      torrent_input:
+        description: 'Enter torrent file URL or magnet link'
+        required: true
+        type: string
+      max_connections:
+        description: 'Max connections per server'
+        required: false
+        default: '10'
+        type: string
+      timeout:
+        description: 'Download timeout in seconds'
+        required: false
+        default: '3600'
+        type: string
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
-  # This workflow contains a single job called "build"
-  build:
-    # The type of runner that the job will run on
+  download:
     runs-on: ubuntu-latest
-
-    # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
-
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
+      - name: Install dependencies
         run: |
-          echo Add other actions to build,
-          echo test, and deploy your project.
+          sudo apt-get update
+          sudo apt-get install -y aria2 curl
+
+      - name: Create downloads directory
+        run: mkdir -p downloads
+
+      - name: Display input received
+        run: |
+          echo "Received input: ${{ github.event.inputs.torrent_input }}"
+          echo "Max connections: ${{ github.event.inputs.max_connections }}"
+          echo "Timeout: ${{ github.event.inputs.timeout }}"
+
+      - name: Validate input
+        id: validate
+        run: |
+          INPUT="${{ github.event.inputs.torrent_input }}"
+          if [[ $INPUT == magnet:* ]]; then
+            echo "type=magnet" >> $GITHUB_OUTPUT
+            echo "input=$INPUT" >> $GITHUB_OUTPUT
+            echo "✅ Detected: Magnet link"
+          elif [[ $INPUT == http* ]] && [[ $INPUT == *.torrent ]]; then
+            echo "type=torrent_url" >> $GITHUB_OUTPUT
+            echo "input=$INPUT" >> $GITHUB_OUTPUT
+            echo "✅ Detected: Torrent file URL"
+          elif [[ $INPUT == http* ]]; then
+            echo "type=torrent_url" >> $GITHUB_OUTPUT
+            echo "input=$INPUT" >> $GITHUB_OUTPUT
+            echo "✅ Detected: URL (will attempt download)"
+          else
+            echo "❌ Invalid input: Must be a magnet link (magnet:?...) or HTTP URL"
+            exit 1
+          fi
+
+      - name: Download via aria2c
+        run: |
+          aria2c \
+            "${{ github.event.inputs.torrent_input }}" \
+            --dir=./downloads \
+            --max-connection-per-server=${{ github.event.inputs.max_connections }} \
+            --split=10 \
+            --timeout=${{ github.event.inputs.timeout }} \
+            --continue=true \
+            --max-tries=5 \
+            --retry-wait=3 \
+            -x 10
+
+      - name: List downloaded files
+        run: |
+          echo "📦 Downloaded files:"
+          ls -lh downloads/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: downloaded-content
+          path: downloads/
+          retention-days: 30
+
+      - name: Create summary
+        if: always()
+        run: |
+          echo "## ✅ Download Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Input Received:** \`${{ github.event.inputs.torrent_input }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Download Settings:**" >> $GITHUB_STEP_SUMMARY
+          echo "- Max Connections: ${{ github.event.inputs.max_connections }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Timeout: ${{ github.event.inputs.timeout }}s" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Files Downloaded:**" >> $GITHUB_STEP_SUMMARY
+          ls -lh downloads/ | tail -n +2 | awk '{print "- " $9 " (" $5 ")"}' >> $GITHUB_STEP_SUMMARY
