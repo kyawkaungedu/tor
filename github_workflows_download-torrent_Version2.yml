@@ -1,0 +1,85 @@
+name: Download Torrent or Magnet
+
+on:
+  workflow_dispatch:
+    inputs:
+      torrent_input:
+        description: 'Torrent file URL or magnet link'
+        required: true
+        type: string
+      max_connections:
+        description: 'Max connections per server'
+        required: false
+        default: '10'
+        type: string
+      timeout:
+        description: 'Download timeout in seconds'
+        required: false
+        default: '3600'
+        type: string
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y aria2 curl
+
+      - name: Create downloads directory
+        run: mkdir -p downloads
+
+      - name: Validate input
+        id: validate
+        run: |
+          INPUT="${{ github.event.inputs.torrent_input }}"
+          if [[ $INPUT == magnet:* ]]; then
+            echo "type=magnet" >> $GITHUB_OUTPUT
+            echo "input=$INPUT" >> $GITHUB_OUTPUT
+          elif [[ $INPUT == http* ]]; then
+            echo "type=torrent_url" >> $GITHUB_OUTPUT
+            echo "input=$INPUT" >> $GITHUB_OUTPUT
+          else
+            echo "type=invalid" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      - name: Download torrent file (if URL provided)
+        if: steps.validate.outputs.type == 'torrent_url'
+        run: |
+          curl -L "${{ steps.validate.outputs.input }}" -o downloads/temp.torrent
+
+      - name: Download via aria2c
+        run: |
+          aria2c \
+            "${{ steps.validate.outputs.input }}" \
+            --dir=./downloads \
+            --max-connection-per-server=${{ github.event.inputs.max_connections }} \
+            --split=10 \
+            --timeout=${{ github.event.inputs.timeout }} \
+            --continue=true \
+            --max-tries=5 \
+            --retry-wait=3
+
+      - name: List downloaded files
+        run: ls -lh downloads/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: downloaded-content
+          path: downloads/
+          retention-days: 30
+
+      - name: Create summary
+        run: |
+          echo "## Download Complete ✅" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Input Type:** ${{ steps.validate.outputs.type }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Files Downloaded:**" >> $GITHUB_STEP_SUMMARY
+          ls -lh downloads/ | tail -n +2 | awk '{print "- " $9 " (" $5 ")"}' >> $GITHUB_STEP_SUMMARY
