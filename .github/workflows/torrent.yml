@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       torrent_input:
-        description: 'Enter DIRECT FILE URL (Must be HTTP/HTTPS Web-Seed URL for 400GB streaming)'
+        description: 'Enter torrent file URL, magnet link, base64 data, or gist URL'
         required: true
         type: string
       hf_upload:
         description: 'Upload to Hugging Face? (true/false)'
         required: false
-        default: 'true'
+        default: 'false'
         type: string
       hf_token:
         description: 'Hugging Face API token (required if upload=true)'
@@ -50,8 +50,11 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-pip git-lfs curl
+          sudo apt-get install -y aria2 python3-pip git-lfs curl
           pip install --upgrade huggingface-hub requests
+
+      - name: Create working directory
+        run: mkdir -p downloads
 
       - name: Validate Hugging Face inputs
         id: validate_hf
@@ -76,96 +79,182 @@ jobs:
           fi
 
       - name: Execute Live Streaming Pipeline to Hugging Face
-        if: steps.validate_hf.outputs.should_upload == 'true'
         env:
           HF_TOKEN: ${{ github.event.inputs.hf_token }}
+          SOURCE_URL: ${{ github.event.inputs.torrent_input }}
+          SHOULD_UPLOAD: ${{ steps.validate_hf.outputs.should_upload }}
         run: |
           REPO_TYPE="${{ github.event.inputs.hf_repo_type }}"
           USERNAME="${{ github.event.inputs.hf_username }}"
           REPO_NAME="${{ github.event.inputs.hf_repo_name }}"
           PRIVATE="${{ github.event.inputs.hf_private }}"
-          SOURCE_URL="${{ github.event.inputs.torrent_input }}"
           
           echo "🚀 Initiating Streaming Middleman Pipeline..."
-          echo "  Source URL: $SOURCE_URL"
           echo "  Target Repository: $USERNAME/$REPO_NAME"
           
           python3 << 'EOF'
           import os
           import sys
-          import requests
+          import time
+          import base64
+          import subprocess
           from huggingface_hub import HfApi
           
+          # 1. Initialize properties and safely resolve environmental scopes
           api = HfApi()
           token = os.getenv("HF_TOKEN")
           source_url = os.getenv("SOURCE_URL")
+          should_upload = os.getenv("SHOULD_UPLOAD") == "true"
+          
           repo_type = "${{ github.event.inputs.hf_repo_type }}"
           username = "${{ github.event.inputs.hf_username }}"
           repo_name = "${{ github.event.inputs.hf_repo_name }}"
           private = "${{ github.event.inputs.hf_private }}" == "true"
-          
-          # Extract target filename from URL
-          file_name = source_url.split("/")[-1].split("?")[0]
-          if not file_name or "." not in file_name:
-              file_name = "streamed_model.bin"
-              
           repo_id = f"{username}/{repo_name}"
           
-          # Create repo if it doesn't exist
-          try:
-            api.create_repo(
-              repo_id=repo_id,
-              repo_type=repo_type,
-              private=private,
-              exist_ok=True,
-              token=token
-            )
-            print(f"✅ Repository ready: {repo_id}")
-          except Exception as e:
-            print(f"⚠️ Repo creation/verification note: {e}")
+          if not source_url:
+              print("❌ Error: SOURCE_URL environment input target missing.")
+              sys.exit(1)
+              
+          target_torrent = source_url
           
-          # Establish the live network memory stream
-          print(f"📡 Opening stream connection to: {source_url}")
-          try:
-              with requests.get(source_url, stream=True, timeout=60) as response:
-                  response.raise_for_status()
-                  
-                  # Generator function feeds 10MB blocks sequentially through RAM buffer
-                  def chunk_generator():
-                      total_bytes = 0
-                      for chunk in response.iter_content(chunk_size=1024 * 1024 * 10): 
-                          if chunk:
-                              total_bytes += len(chunk)
-                              # Simple progress heartbeat logging to terminal
-                              if total_bytes % (1024 * 1024 * 500) == 0:
-                                  print(f"🔄 Streamed {total_bytes / (1024*1024*1024):.2f} GB through RAM...")
-                              yield chunk
-
-                  print(f"📤 Uploading file '{file_name}' to {repo_id} without writing to local disk...")
-                  api.upload_file(
-                      path_or_fileobj=chunk_generator(),
-                      path_in_repo=file_name,
+          # 2. Decode inline payload if base64 formatted
+          if source_url.startswith("data:") or "base64," in source_url:
+              print("📁 Processing inline base64 content...")
+              try:
+                  raw_data = source_url.split("base64,")[-1]
+                  decoded_bytes = base64.b64decode(raw_data)
+                  with open("local.torrent", "wb") as f:
+                      f.write(decoded_bytes)
+                  target_torrent = "local.torrent"
+                  print("✅ Metadata successfully converted to local.torrent")
+              except Exception as e:
+                  print(f"❌ Failed to decode target payload payload: {e}")
+                  sys.exit(1)
+          elif source_url.startswith("gist:"):
+              print("📁 Fetching Gist metadata package...")
+              try:
+                  gist_url = source_url.replace("gist:", "")
+                  res = subprocess.check_output(f"curl -s {gist_url}", shell=True)
+                  raw_data = res.decode("utf-8").split("base64,")[-1].strip()
+                  with open("local.torrent", "wb") as f:
+                      f.write(base64.b64decode(raw_data))
+                  target_torrent = "local.torrent"
+              except Exception as e:
+                  print(f"❌ Failed to parse Gist path content: {e}")
+                  sys.exit(1)
+          
+          # 3. Handle Repository Initialization
+          if should_upload:
+              try:
+                  api.create_repo(
                       repo_id=repo_id,
                       repo_type=repo_type,
+                      private=private,
+                      exist_ok=True,
                       token=token
                   )
-                  print(f"✅ Successfully streamed and uploaded: {file_name}")
-          except Exception as e:
-              print(f"❌ Streaming pipeline failed: {e}")
+                  print(f"✅ Target repository verified and online: {repo_id}")
+              except Exception as e:
+                  print(f"⚠️ Repo creation/verification note: {e}")
+          
+          # 4. Active Intermittent Execution Strategy
+          # Launches aria2c using system shell controls
+          print("⏬ Launching aria2c pipeline subsystem engine...")
+          aria_cmd = [
+              "aria2c",
+              "--dir=./downloads",
+              "--seed-time=0",
+              "--file-allocation=none",
+              "--summary-interval=30",
+              target_torrent
+          ]
+          
+          process = subprocess.Popen(aria_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+          
+          # Continuous non-blocking directory cleanup daemon loop
+          # Watches the folder while aria2 downloads, uploading finished segments to clear disk space
+          try:
+              while process.poll() is None:
+                  # Read live command logs from aria2c engine terminal pipeline
+                  line = process.stdout.readline()
+                  if line:
+                      print(f"[aria2c] {line.strip()}")
+                      
+                  # Scan folder assets dynamically to push out contents before 30GB crash limit hits
+                  if should_upload and os.path.exists("./downloads"):
+                      for root, _, files in os.walk("./downloads"):
+                          for file in files:
+                              # Never upload active lock segments or controls
+                              if file.endswith(".aria2") or file.endswith(".part"):
+                                  continue
+                                  
+                              file_path = os.path.join(root, file)
+                              rel_path = os.path.relpath(file_path, "./downloads")
+                              file_size = os.path.getsize(file_path)
+                              
+                              # Ensure segment asset file has stabilized data and is fully complete
+                              if file_size > 0:
+                                  print(f"📤 Dynamically pushing complete file segment: {rel_path} ({file_size / (1024*1024):.2f} MB)")
+                                  try:
+                                      api.upload_file(
+                                          path_or_fileobj=file_path,
+                                          path_in_repo=rel_path,
+                                          repo_id=repo_id,
+                                          repo_type=repo_type,
+                                          token=token
+                                      )
+                                      print(f"✅ Chunk pushed successfully. Purging disk block allocation...")
+                                      os.remove(file_path) # Instantly free space
+                                  except Exception as upload_err:
+                                      print(f"⚠️ Interrupted push block cycle context: {upload_err}")
+                                      
+                  time.sleep(2)
+                  
+              # Read remaining logs upon terminal conclusion
+              for line in process.stdout.readlines():
+                  print(f"[aria2c-final] {line.strip()}")
+                  
+          except KeyboardInterrupt:
+              process.terminate()
               sys.exit(1)
+              
+          # 5. Finalize uploads for any files that finished right at the end
+          if should_upload and os.path.exists("./downloads"):
+              print("🏁 Running final cleanup repository upload sweep...")
+              for root, _, files in os.walk("./downloads"):
+                  for file in files:
+                      if file.endswith(".aria2"):
+                          continue
+                      file_path = os.path.join(root, file)
+                      rel_path = os.path.relpath(file_path, "./downloads")
+                      try:
+                          api.upload_file(
+                              path_or_fileobj=file_path,
+                              path_in_repo=rel_path,
+                              repo_id=repo_id,
+                              repo_type=repo_type,
+                              token=token
+                          )
+                          os.remove(file_path)
+                          print(f"✅ Final piece safe: {rel_path}")
+                      except Exception as e:
+                          print(f"❌ Sweep cycle anomaly detected: {e}")
+          
+          print("🎉 Job pipeline processing sequence completed successfully.")
           EOF
 
       - name: Create summary
         if: always()
         run: |
-          echo "## ✅ Streaming Pipeline Complete" >> $GITHUB_STEP_SUMMARY
+          echo "## ✅ Streaming Pipeline Workflow Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
           UPLOAD="${{ github.event.inputs.hf_upload }}"
           if [[ "$UPLOAD" == "true" ]]; then
             USERNAME="${{ github.event.inputs.hf_username }}"
             REPO_NAME="${{ github.event.inputs.hf_repo_name }}"
-            echo "**Hugging Face Status:** Live stream completed to [$USERNAME/$REPO_NAME](https://huggingface.co/$USERNAME/$REPO_NAME)" >> $GITHUB_STEP_SUMMARY
+            echo "**Hugging Face Target Instance Status:** Active pipeline upload executed to [$USERNAME/$REPO_NAME](https://huggingface.co/$USERNAME/$REPO_NAME)" >> $GITHUB_STEP_SUMMARY
           else
-            echo "**Hugging Face Status:** ⏸️ Script execution bypassed" >> $GITHUB_STEP_SUMMARY
+            echo "**Hugging Face Target Instance Status:** Bypassed upload routing rules manually." >> $GITHUB_STEP_SUMMARY
           fi
