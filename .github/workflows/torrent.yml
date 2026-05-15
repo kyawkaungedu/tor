@@ -51,10 +51,44 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y aria2 python3-pip git-lfs curl
-          pip install --upgrade huggingface-hub requests
+          pip install --upgrade huggingface-hub
 
-      - name: Create working directory
+      - name: Create downloads directory
         run: mkdir -p downloads
+
+      - name: Download torrent/magnet
+        run: |
+          INPUT="${{ github.event.inputs.torrent_input }}"
+          TARGET_FILE=""
+          
+          if [[ "$INPUT" == gist:* ]]; then
+            echo "📁 Detected Gist URL bypass for large torrent. Downloading..."
+            GIST_URL="${INPUT#gist:}"
+            curl -s "$GIST_URL" | sed 's/^data:.*base64,//' | base64 --decode > local.torrent
+            TARGET_FILE="local.torrent"
+          elif [[ "$INPUT" == data:* ]]; then
+            echo "📁 Detected inline base64 torrent file. Decoding..."
+            echo "$INPUT" | sed 's/^data:.*base64,//' | base64 --decode > local.torrent
+            TARGET_FILE="local.torrent"
+          else
+            echo "🔗 Detected standard URL or Magnet link."
+            TARGET_FILE="$INPUT"
+          fi
+          
+          echo "⏬ Starting download with aria2c..."
+          aria2c --dir=./downloads \
+                 --seed-time=0 \
+                 --file-allocation=none \
+                 --summary-interval=10 \
+                 "$TARGET_FILE"
+          
+          echo "✅ Download completed"
+
+      - name: List downloaded files
+        run: |
+          echo "📦 Downloaded files:"
+          du -sh downloads/*
+          ls -lh downloads/
 
       - name: Validate Hugging Face inputs
         id: validate_hf
@@ -78,183 +112,99 @@ jobs:
             echo "should_upload=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Execute Live Streaming Pipeline to Hugging Face
+      - name: Upload to Hugging Face
+        if: steps.validate_hf.outputs.should_upload == 'true'
         env:
           HF_TOKEN: ${{ github.event.inputs.hf_token }}
-          SOURCE_URL: ${{ github.event.inputs.torrent_input }}
-          SHOULD_UPLOAD: ${{ steps.validate_hf.outputs.should_upload }}
         run: |
           REPO_TYPE="${{ github.event.inputs.hf_repo_type }}"
           USERNAME="${{ github.event.inputs.hf_username }}"
           REPO_NAME="${{ github.event.inputs.hf_repo_name }}"
           PRIVATE="${{ github.event.inputs.hf_private }}"
           
-          echo "🚀 Initiating Streaming Middleman Pipeline..."
-          echo "  Target Repository: $USERNAME/$REPO_NAME"
+          echo "🚀 Uploading to Hugging Face..."
+          echo "  Repository: $USERNAME/$REPO_NAME"
+          echo "  Type: $REPO_TYPE"
+          echo "  Private: $PRIVATE"
           
+          # Python script for upload
           python3 << 'EOF'
           import os
-          import sys
-          import time
-          import base64
-          import subprocess
+          # FIX: Removed RepoType import
           from huggingface_hub import HfApi
           
-          # 1. Initialize properties and safely resolve environmental scopes
           api = HfApi()
           token = os.getenv("HF_TOKEN")
-          source_url = os.getenv("SOURCE_URL")
-          should_upload = os.getenv("SHOULD_UPLOAD") == "true"
-          
           repo_type = "${{ github.event.inputs.hf_repo_type }}"
           username = "${{ github.event.inputs.hf_username }}"
           repo_name = "${{ github.event.inputs.hf_repo_name }}"
           private = "${{ github.event.inputs.hf_private }}" == "true"
+          
+          # Create repo if it doesn't exist
           repo_id = f"{username}/{repo_name}"
-          
-          if not source_url:
-              print("❌ Error: SOURCE_URL environment input target missing.")
-              sys.exit(1)
-              
-          target_torrent = source_url
-          
-          # 2. Decode inline payload if base64 formatted
-          if source_url.startswith("data:") or "base64," in source_url:
-              print("📁 Processing inline base64 content...")
-              try:
-                  raw_data = source_url.split("base64,")[-1]
-                  decoded_bytes = base64.b64decode(raw_data)
-                  with open("local.torrent", "wb") as f:
-                      f.write(decoded_bytes)
-                  target_torrent = "local.torrent"
-                  print("✅ Metadata successfully converted to local.torrent")
-              except Exception as e:
-                  print(f"❌ Failed to decode target payload payload: {e}")
-                  sys.exit(1)
-          elif source_url.startswith("gist:"):
-              print("📁 Fetching Gist metadata package...")
-              try:
-                  gist_url = source_url.replace("gist:", "")
-                  res = subprocess.check_output(f"curl -s {gist_url}", shell=True)
-                  raw_data = res.decode("utf-8").split("base64,")[-1].strip()
-                  with open("local.torrent", "wb") as f:
-                      f.write(base64.b64decode(raw_data))
-                  target_torrent = "local.torrent"
-              except Exception as e:
-                  print(f"❌ Failed to parse Gist path content: {e}")
-                  sys.exit(1)
-          
-          # 3. Handle Repository Initialization
-          if should_upload:
-              try:
-                  api.create_repo(
-                      repo_id=repo_id,
-                      repo_type=repo_type,
-                      private=private,
-                      exist_ok=True,
-                      token=token
-                  )
-                  print(f"✅ Target repository verified and online: {repo_id}")
-              except Exception as e:
-                  print(f"⚠️ Repo creation/verification note: {e}")
-          
-          # 4. Active Intermittent Execution Strategy
-          # Launches aria2c using system shell controls
-          print("⏬ Launching aria2c pipeline subsystem engine...")
-          aria_cmd = [
-              "aria2c",
-              "--dir=./downloads",
-              "--seed-time=0",
-              "--file-allocation=none",
-              "--summary-interval=30",
-              target_torrent
-          ]
-          
-          process = subprocess.Popen(aria_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-          
-          # Continuous non-blocking directory cleanup daemon loop
-          # Watches the folder while aria2 downloads, uploading finished segments to clear disk space
           try:
-              while process.poll() is None:
-                  # Read live command logs from aria2c engine terminal pipeline
-                  line = process.stdout.readline()
-                  if line:
-                      print(f"[aria2c] {line.strip()}")
-                      
-                  # Scan folder assets dynamically to push out contents before 30GB crash limit hits
-                  if should_upload and os.path.exists("./downloads"):
-                      for root, _, files in os.walk("./downloads"):
-                          for file in files:
-                              # Never upload active lock segments or controls
-                              if file.endswith(".aria2") or file.endswith(".part"):
-                                  continue
-                                  
-                              file_path = os.path.join(root, file)
-                              rel_path = os.path.relpath(file_path, "./downloads")
-                              file_size = os.path.getsize(file_path)
-                              
-                              # Ensure segment asset file has stabilized data and is fully complete
-                              if file_size > 0:
-                                  print(f"📤 Dynamically pushing complete file segment: {rel_path} ({file_size / (1024*1024):.2f} MB)")
-                                  try:
-                                      api.upload_file(
-                                          path_or_fileobj=file_path,
-                                          path_in_repo=rel_path,
-                                          repo_id=repo_id,
-                                          repo_type=repo_type,
-                                          token=token
-                                      )
-                                      print(f"✅ Chunk pushed successfully. Purging disk block allocation...")
-                                      os.remove(file_path) # Instantly free space
-                                  except Exception as upload_err:
-                                      print(f"⚠️ Interrupted push block cycle context: {upload_err}")
-                                      
-                  time.sleep(2)
-                  
-              # Read remaining logs upon terminal conclusion
-              for line in process.stdout.readlines():
-                  print(f"[aria2c-final] {line.strip()}")
-                  
-          except KeyboardInterrupt:
-              process.terminate()
-              sys.exit(1)
-              
-          # 5. Finalize uploads for any files that finished right at the end
-          if should_upload and os.path.exists("./downloads"):
-              print("🏁 Running final cleanup repository upload sweep...")
-              for root, _, files in os.walk("./downloads"):
-                  for file in files:
-                      if file.endswith(".aria2"):
-                          continue
-                      file_path = os.path.join(root, file)
-                      rel_path = os.path.relpath(file_path, "./downloads")
-                      try:
-                          api.upload_file(
-                              path_or_fileobj=file_path,
-                              path_in_repo=rel_path,
-                              repo_id=repo_id,
-                              repo_type=repo_type,
-                              token=token
-                          )
-                          os.remove(file_path)
-                          print(f"✅ Final piece safe: {rel_path}")
-                      except Exception as e:
-                          print(f"❌ Sweep cycle anomaly detected: {e}")
+            api.create_repo(
+              repo_id=repo_id,
+              repo_type=repo_type,
+              private=private,
+              exist_ok=True,
+              token=token
+            )
+            print(f"✅ Repository ready: {repo_id}")
+          except Exception as e:
+            print(f"⚠️ Repo creation: {e}")
           
-          print("🎉 Job pipeline processing sequence completed successfully.")
+          # Upload all files
+          for root, dirs, files in os.walk("./downloads"):
+            for file in files:
+              # Skip any aria2 control files just in case
+              if file.endswith('.aria2') or file == 'local.torrent':
+                  continue
+                  
+              file_path = os.path.join(root, file)
+              relative_path = os.path.relpath(file_path, "./downloads")
+              
+              try:
+                print(f"📤 Uploading: {relative_path}")
+                api.upload_file(
+                  path_or_fileobj=file_path,
+                  path_in_repo=relative_path,
+                  repo_id=repo_id,
+                  repo_type=repo_type,
+                  token=token
+                )
+                print(f"✅ Uploaded: {relative_path}")
+              except Exception as e:
+                print(f"❌ Failed to upload {relative_path}: {e}")
+                raise
+          
+          print(f"\n✅ All files uploaded to {repo_id}")
           EOF
+
+      - name: Upload artifact (local backup)
+        uses: actions/upload-artifact@v4
+        with:
+          name: downloaded-content
+          path: downloads/
+          retention-days: 30
 
       - name: Create summary
         if: always()
         run: |
-          echo "## ✅ Streaming Pipeline Workflow Summary" >> $GITHUB_STEP_SUMMARY
+          echo "## ✅ Download & Upload Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Download Status:** ✅ Completed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Downloaded Files:**" >> $GITHUB_STEP_SUMMARY
+          ls -lh downloads/ 2>/dev/null | tail -n +2 | awk '{print "- " $9 " (" $5 ")"}' >> $GITHUB_STEP_SUMMARY || echo "- No files" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
           UPLOAD="${{ github.event.inputs.hf_upload }}"
           if [[ "$UPLOAD" == "true" ]]; then
             USERNAME="${{ github.event.inputs.hf_username }}"
             REPO_NAME="${{ github.event.inputs.hf_repo_name }}"
-            echo "**Hugging Face Target Instance Status:** Active pipeline upload executed to [$USERNAME/$REPO_NAME](https://huggingface.co/$USERNAME/$REPO_NAME)" >> $GITHUB_STEP_SUMMARY
+            REPO_TYPE="${{ github.event.inputs.hf_repo_type }}"
+            echo "**Hugging Face Upload:** ✅ Uploaded to [$USERNAME/$REPO_NAME](https://huggingface.co/$USERNAME/$REPO_NAME)" >> $GITHUB_STEP_SUMMARY
           else
-            echo "**Hugging Face Target Instance Status:** Bypassed upload routing rules manually." >> $GITHUB_STEP_SUMMARY
+            echo "**Hugging Face Upload:** ⏸️ Skipped" >> $GITHUB_STEP_SUMMARY
           fi
