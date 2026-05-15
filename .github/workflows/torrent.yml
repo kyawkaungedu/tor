@@ -12,15 +12,11 @@ on:
         required: false
         default: '10'
         type: string
-      timeout:
-        description: 'Download timeout in seconds (1-600, default 60)'
-        required: false
-        default: '60'
-        type: string
 
 jobs:
   download:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -33,52 +29,23 @@ jobs:
       - name: Create downloads directory
         run: mkdir -p downloads
 
-      - name: Display input received
-        run: |
-          echo "Received input: ${{ github.event.inputs.torrent_input }}"
-          echo "Max connections: ${{ github.event.inputs.max_connections }}"
-          echo "Timeout: ${{ github.event.inputs.timeout }}"
-
-      - name: Validate timeout
-        id: validate_timeout
-        run: |
-          TIMEOUT=${{ github.event.inputs.timeout }}
-          if [ $TIMEOUT -lt 1 ] || [ $TIMEOUT -gt 600 ]; then
-            echo "⚠️ Timeout must be between 1-600 seconds. Using default: 60"
-            echo "timeout=60" >> $GITHUB_OUTPUT
-          else
-            echo "timeout=$TIMEOUT" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Validate input
-        id: validate
-        run: |
-          INPUT="${{ github.event.inputs.torrent_input }}"
-          if [[ $INPUT == magnet:* ]]; then
-            echo "type=magnet" >> $GITHUB_OUTPUT
-            echo "input=$INPUT" >> $GITHUB_OUTPUT
-            echo "✅ Detected: Magnet link"
-          elif [[ $INPUT == http* ]]; then
-            echo "type=torrent_url" >> $GITHUB_OUTPUT
-            echo "input=$INPUT" >> $GITHUB_OUTPUT
-            echo "✅ Detected: Torrent file URL"
-          else
-            echo "❌ Invalid input: Must be a magnet link (magnet:?...) or HTTP URL"
-            exit 1
-          fi
-
-      - name: Download via aria2c
+      - name: Download via aria2c (NO SEEDING)
         run: |
           aria2c \
             "${{ github.event.inputs.torrent_input }}" \
             --dir=./downloads \
             --max-connection-per-server=${{ github.event.inputs.max_connections }} \
             --split=10 \
-            --timeout=${{ steps.validate_timeout.outputs.timeout }} \
             --continue=true \
             --max-tries=5 \
             --retry-wait=3 \
-            -x 10
+            -x 10 \
+            --bt-stop-timeout=0 \
+            --seed-time=0 \
+            --bt-seed-uncontrolled=false \
+            --bt-max-peers=50 \
+            --disable-ipv6 \
+            --no-conf
 
       - name: List downloaded files
         run: |
@@ -97,11 +64,5 @@ jobs:
         run: |
           echo "## ✅ Download Complete" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Input Received:** \`${{ github.event.inputs.torrent_input }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Download Settings:**" >> $GITHUB_STEP_SUMMARY
-          echo "- Max Connections: ${{ github.event.inputs.max_connections }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Timeout: ${{ steps.validate_timeout.outputs.timeout }}s" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Files Downloaded:**" >> $GITHUB_STEP_SUMMARY
+          echo "**Downloaded File:**" >> $GITHUB_STEP_SUMMARY
           ls -lh downloads/ | tail -n +2 | awk '{print "- " $9 " (" $5 ")"}' >> $GITHUB_STEP_SUMMARY || echo "- No files downloaded" >> $GITHUB_STEP_SUMMARY
