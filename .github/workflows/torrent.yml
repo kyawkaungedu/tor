@@ -50,7 +50,6 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          # NEW: Removed transmission-cli, added aria2
           sudo apt-get install -y aria2 python3-pip git-lfs curl
           pip install --upgrade huggingface-hub
 
@@ -77,7 +76,6 @@ jobs:
           fi
           
           echo "⏬ Starting download with aria2c..."
-          # NEW: Executing via aria2c
           aria2c --dir=./downloads \
                  --seed-time=0 \
                  --file-allocation=none \
@@ -132,7 +130,8 @@ jobs:
           # Python script for upload
           python3 << 'EOF'
           import os
-          from huggingface_hub import HfApi, RepoType
+          # FIX: Removed RepoType import
+          from huggingface_hub import HfApi
           
           api = HfApi()
           token = os.getenv("HF_TOKEN")
@@ -158,8 +157,8 @@ jobs:
           # Upload all files
           for root, dirs, files in os.walk("./downloads"):
             for file in files:
-              # NEW: Skip any aria2 control files just in case
-              if file.endswith('.aria2'):
+              # Skip any aria2 control files just in case
+              if file.endswith('.aria2') or file == 'local.torrent':
                   continue
                   
               file_path = os.path.join(root, file)
