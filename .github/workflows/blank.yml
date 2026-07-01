@@ -1,19 +1,43 @@
-- name: Maximize Free Disk Space
-  run: |
-    echo "=== Disk space before cleanup ==="
-    df -h
-    
-    # Remove heavy software runtimes and SDKs
-    sudo rm -rf /usr/local/lib/android
-    sudo rm -rf /opt/ghc
-    sudo rm -rf /usr/local/share/boost
-    sudo rm -rf /usr/share/dotnet
-    sudo rm -rf /opt/pipx
-    sudo rm -rf "$AGENT_TOOLSDIRECTORY"
-    
-    # Clean up Docker system and caches
-    docker system prune -a --force --volumes
-    sudo apt-get clean
-    
-    echo "=== Disk space after cleanup ==="
-    df -h
+name: CI with Maximized Free Space
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch: # Allows you to trigger this manually
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Freeing Up Disk Space
+        run: |
+          echo "=== Disk space before cleanup ==="
+          df -h
+          
+          # 1. Remove heavy pre-installed software runtimes and SDKs
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/pipx
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          
+          # 2. Clean up Docker images, containers, and cache volumes
+          docker system prune -a --force --volumes
+          
+          # 3. Clean up apt package caches
+          sudo apt-get clean
+          
+          echo "=== Disk space after cleanup ==="
+          df -h
+
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Run Your Free Build Steps
+        run: |
+          echo "Your build code goes here."
+          echo "You now have maximum free storage space!"
